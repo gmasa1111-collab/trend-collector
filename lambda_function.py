@@ -1,0 +1,237 @@
+import json
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+import os
+from datetime import datetime, timezone, timedelta
+
+# ──────────────────────────────────────────────
+# 設定：環境変数から読み込む
+# ──────────────────────────────────────────────
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+# 監視するRSSフィード一覧（好みに合わせて追加・削除してください）
+RSS_FEEDS = [
+    {
+        "name": "Gartner Blog",
+        "url": "https://blogs.gartner.com/feed/"
+    },
+    {
+        "name": "TDWI",
+        "url": "https://tdwi.org/rss-feeds/all-articles.aspx"
+    },
+    {
+        "name": "Towards Data Science",
+        "url": "https://towardsdatascience.com/feed"
+    },
+    {
+        "name": "Data Mesh Radio (Medium)",
+        "url": "https://medium.com/feed/tag/data-mesh"
+    },
+]
+
+# データマネジメント関連キーワード（含まれていない記事は除外）
+KEYWORDS = [
+    "data governance", "data mesh", "data management", "data quality",
+    "data catalog", "master data", "data lineage", "data fabric",
+    "データガバナンス", "データマネジメント", "データ品質", "データカタログ",
+]
+
+MAX_ARTICLES_PER_RUN = 5  # 1回の実行で要約する記事の最大数
+
+
+# ──────────────────────────────────────────────
+# RSSを取得して記事リストを返す
+# ──────────────────────────────────────────────
+def fetch_rss(feed_url: str, feed_name: str) -> list[dict]:
+    articles = []
+    try:
+        req = urllib.request.Request(
+            feed_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; TrendBot/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content = resp.read()
+
+        root = ET.fromstring(content)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+        # RSS 2.0 形式
+        for item in root.findall(".//item"):
+            title = item.findtext("title", "").strip()
+            link  = item.findtext("link", "").strip()
+            desc  = item.findtext("description", "").strip()
+            pub   = item.findtext("pubDate", "").strip()
+            articles.append({
+                "source": feed_name,
+                "title": title,
+                "link": link,
+                "description": desc[:500],  # 長すぎる説明は切り詰める
+                "pub_date": pub,
+            })
+
+        # Atom 形式
+        if not articles:
+            for entry in root.findall("atom:entry", ns):
+                title = entry.findtext("atom:title", "", ns).strip()
+                link_el = entry.find("atom:link", ns)
+                link = link_el.get("href", "") if link_el is not None else ""
+                summary = entry.findtext("atom:summary", "", ns).strip()
+                pub = entry.findtext("atom:published", "", ns).strip()
+                articles.append({
+                    "source": feed_name,
+                    "title": title,
+                    "link": link,
+                    "description": summary[:500],
+                    "pub_date": pub,
+                })
+
+    except Exception as e:
+        print(f"[ERROR] RSSフィード取得失敗: {feed_name} / {e}")
+
+    return articles
+
+
+# ──────────────────────────────────────────────
+# キーワードフィルタリング
+# ──────────────────────────────────────────────
+def is_relevant(article: dict) -> bool:
+    text = (article["title"] + " " + article["description"]).lower()
+    return any(kw.lower() in text for kw in KEYWORDS)
+
+
+# ──────────────────────────────────────────────
+# Claude API で記事を要約
+# ──────────────────────────────────────────────
+def summarize_with_claude(articles: list[dict]) -> str:
+    articles_text = ""
+    for i, a in enumerate(articles, 1):
+        articles_text += (
+            f"【記事{i}】\n"
+            f"タイトル: {a['title']}\n"
+            f"ソース: {a['source']}\n"
+            f"URL: {a['link']}\n"
+            f"概要: {a['description']}\n\n"
+        )
+
+    prompt = f"""あなたはデータマネジメント分野のコンサルタントをサポートするアシスタントです。
+以下の記事を読み、日本語で簡潔にまとめてください。
+
+出力形式：
+- 各記事を1〜2行で要約
+- データマネジメント観点での重要ポイントを末尾に1行添える
+- 絵文字を使って読みやすくする
+
+記事一覧：
+{articles_text}"""
+
+    payload = json.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1000,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read())
+
+    return result["content"][0]["text"]
+
+
+# ──────────────────────────────────────────────
+# Slack に投稿
+# ──────────────────────────────────────────────
+def post_to_slack(summary: str, articles: list[dict]):
+    jst = timezone(timedelta(hours=9))
+    today = datetime.now(jst).strftime("%Y年%m月%d日")
+
+    # リンク一覧を追加
+    links_text = "\n".join(
+        [f"• <{a['link']}|{a['title']}>" for a in articles]
+    )
+
+    message = {
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"📊 データマネジメント トレンドまとめ｜{today}"
+                }
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": summary}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*📎 元記事リンク*\n{links_text}"
+                }
+            }
+        ]
+    }
+
+    payload = json.dumps(message).encode("utf-8")
+    req = urllib.request.Request(
+        SLACK_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        print(f"[Slack] ステータス: {resp.status}")
+
+
+# ──────────────────────────────────────────────
+# Lambda エントリーポイント
+# ──────────────────────────────────────────────
+def lambda_handler(event, context):
+    print("=== トレンド収集 開始 ===")
+
+    # 全フィードから記事収集
+    all_articles = []
+    for feed in RSS_FEEDS:
+        articles = fetch_rss(feed["url"], feed["name"])
+        print(f"  {feed['name']}: {len(articles)}件取得")
+        all_articles.extend(articles)
+
+    # キーワードフィルタリング
+    relevant = [a for a in all_articles if is_relevant(a)]
+    print(f"関連記事: {len(relevant)}件 / 全{len(all_articles)}件")
+
+    if not relevant:
+        print("関連記事なし。終了。")
+        return {"statusCode": 200, "body": "No relevant articles found."}
+
+    # 最大件数に絞る
+    target = relevant[:MAX_ARTICLES_PER_RUN]
+
+    # Claude で要約
+    print("Claude APIで要約中...")
+    summary = summarize_with_claude(target)
+
+    # Slack に投稿
+    print("Slackに投稿中...")
+    post_to_slack(summary, target)
+
+    print("=== 完了 ===")
+    return {"statusCode": 200, "body": f"{len(target)}件の記事を投稿しました"}
+
+
+# ローカルテスト用
+if __name__ == "__main__":
+    lambda_handler({}, {})
