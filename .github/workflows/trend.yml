@@ -1,0 +1,23 @@
+name: データマネジメント トレンド収集
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 毎朝9時JST
+  workflow_dispatch:        # 手動実行ボタンも有効にする
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: トレンド収集を実行
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python main.py
