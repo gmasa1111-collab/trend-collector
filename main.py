@@ -1,10 +1,9 @@
 import json
 import urllib.request
-import urllib.error  # 💡 エラーハンドリングのために追加
 import xml.etree.ElementTree as ET
 import os
-import time          # 💡 リトライの待ち時間のために追加
 from datetime import datetime, timezone, timedelta
+from google import genai  # 💡 Google公式の最新ライブラリをインポート
 
 # ──────────────────────────────────────────────
 # 設定：環境変数から読み込む
@@ -86,7 +85,7 @@ def is_relevant(article: dict) -> bool:
 
 
 # ──────────────────────────────────────────────
-# Gemini API で記事を要約（エラーリトライ機能付き）
+# Gemini API で記事を要約（公式SDKによる自動リトライ）
 # ──────────────────────────────────────────────
 def summarize_with_gemini(articles: list) -> str:
     articles_text = ""
@@ -110,41 +109,15 @@ def summarize_with_gemini(articles: list) -> str:
 記事一覧：
 {articles_text}"""
 
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}]
-    }).encode("utf-8")
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    )
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
+    # 💡 公式クライアントを初期化（自動でリトライやスマートなエラー処理を行ってくれます）
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    response = client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=prompt,
     )
 
-    # 💡【改良】429エラー対策として最大3回リトライを行う
-    MAX_RETRIES = 3
-    RETRY_DELAY = 5  # エラー時に待つ秒数
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read())
-            return result["candidates"][0]["content"]["parts"][0]["text"]
-
-        except urllib.error.HTTPError as e:
-            # 制限超過(429)またはサーバー一時エラー(503など)の場合、少し待ってリトライ
-            if e.code in [429, 503] and attempt < MAX_RETRIES:
-                print(f"[WARN] Gemini APIが混雑しています({e.code})。 {RETRY_DELAY}秒後に再試行します... (試行 {attempt}/{MAX_RETRIES})")
-                time.sleep(RETRY_DELAY)
-                # 次の試行では少し待ち時間を長くする（バックオフ）
-                RETRY_DELAY *= 2
-            else:
-                # 諦めてエラーを発生させる
-                raise e
+    return response.text
 
 
 # ──────────────────────────────────────────────
