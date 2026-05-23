@@ -16,11 +16,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: ライブラリをインストール
-        run: pip install google-genai
-
-      - name: トレンド収集を実行
+      # 💡【修正】1つのステップの中で、インストールと実行を連続して行います
+      # 「run: |」の「|」は、複数行のコマンドをまとめて実行するという意味です
+      - name: ライブラリ導入とトレンド収集の実行
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python main.py
+        run: |
+          pip install google-genai
+          python main.py
