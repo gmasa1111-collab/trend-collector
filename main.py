@@ -1,7 +1,9 @@
 import json
 import urllib.request
+import urllib.error  # 💡 エラーハンドリングのために追加
 import xml.etree.ElementTree as ET
 import os
+import time          # 💡 リトライの待ち時間のために追加
 from datetime import datetime, timezone, timedelta
 
 # ──────────────────────────────────────────────
@@ -84,7 +86,7 @@ def is_relevant(article: dict) -> bool:
 
 
 # ──────────────────────────────────────────────
-# Gemini API で記事を要約
+# Gemini API で記事を要約（エラーリトライ機能付き）
 # ──────────────────────────────────────────────
 def summarize_with_gemini(articles: list) -> str:
     articles_text = ""
@@ -122,10 +124,27 @@ def summarize_with_gemini(articles: list) -> str:
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        result = json.loads(resp.read())
 
-    return result["candidates"][0]["content"]["parts"][0]["text"]
+    # 💡【改良】429エラー対策として最大3回リトライを行う
+    MAX_RETRIES = 3
+    RETRY_DELAY = 5  # エラー時に待つ秒数
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+            return result["candidates"][0]["content"]["parts"][0]["text"]
+
+        except urllib.error.HTTPError as e:
+            # 制限超過(429)またはサーバー一時エラー(503など)の場合、少し待ってリトライ
+            if e.code in [429, 503] and attempt < MAX_RETRIES:
+                print(f"[WARN] Gemini APIが混雑しています({e.code})。 {RETRY_DELAY}秒後に再試行します... (試行 {attempt}/{MAX_RETRIES})")
+                time.sleep(RETRY_DELAY)
+                # 次の試行では少し待ち時間を長くする（バックオフ）
+                RETRY_DELAY *= 2
+            else:
+                # 諦めてエラーを発生させる
+                raise e
 
 
 # ──────────────────────────────────────────────
